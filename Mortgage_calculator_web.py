@@ -25,6 +25,7 @@ class Installment:
     balance: float
     cashback: float
     net_paid: float
+    rate_annual_pct: float
 
 
 def annuity_payment(balance: float, annual_rate_pct: float, periods: int, payments_per_year: int) -> float:
@@ -186,15 +187,15 @@ def build_schedule(
         if is_last:
             bal_out = 0.0
 
-        schedule.append(Installment(k, base_out, over_out, lump_out,
-                        int_out, prin_out, bal_out, cb_out, net_paid_out))
+        schedule.append(Installment(k, base_out, over_out, lump_out, int_out, prin_out, bal_out, cb_out, net_paid_out, round(current_rate, 4)
+                                    ))
 
         if k > total_periods * 3 + 10_000:
             raise RuntimeError("Schedule did not converge—check inputs.")
 
     if upfront_cashback > 0:
         schedule.insert(0, Installment(0, 0.0, 0.0, 0.0, 0.0, 0.0, round(
-            principal, 2), upfront_cashback, -upfront_cashback))
+            principal, 2), upfront_cashback, -upfront_cashback, round(current_rate, 4)))
 
     return schedule
 
@@ -267,14 +268,24 @@ st.caption(
 with st.sidebar:
     st.header("Loan Basics")
     principal = st.number_input(
-        "Mortgage amount (€)", min_value=0.0, value=350000.0, step=1000.0)
+        "Mortgage amount (€)", min_value=0.0, value=400000.0, step=1000.0)
     rate = st.number_input("Starting nominal annual rate (%)",
-                           min_value=0.0, value=4.25, step=0.05)
-    term_years = st.number_input("Term (years)", min_value=1, value=30, step=1)
+                           min_value=0.0, value=3.40, step=0.05)
+    term_years = st.number_input("Term (years)", min_value=1, value=35, step=1)
     freq = st.selectbox("Repayment frequency", options=[("Monthly", 12), ("Fortnightly", 26), (
         "Weekly", 52), ("Quarterly", 4)], index=0, format_func=lambda x: x[0])
     payments_per_year = freq[1]
 
+    st.header("Rate Type")
+    rate_type = st.selectbox("Rate type", options=[
+                             "Fixed", "Variable"], index=0)
+    fixed_years = st.number_input("Fixed period (years)", min_value=1, max_value=int(
+        term_years), value=1, step=1, disabled=(rate_type == "Variable"))
+    roll_rate_after_fixed = st.number_input(
+        "Roll rate after fixed period (%)", min_value=0.0, value=rate, step=0.05, disabled=(rate_type == "Variable"))
+    rate_text = f"{(fixed_years * payments_per_year) + 1}:{roll_rate_after_fixed}" if rate_type == "Fixed" else ""
+    # rate_text = st.text_input(
+    #     "Variable rates (Starting installment # and new variable rate %, e.g. 61:4.15%)", value="")
     st.header("Overpayments")
     regular_overpay = st.number_input(
         "Regular overpayment per installment (€)", min_value=0.0, value=0.0, step=50.0)
@@ -286,8 +297,7 @@ with st.sidebar:
     st.header("Extras")
     lump_text = st.text_input(
         "One-off lump sums (period:amount, comma-separated)", value="")
-    rate_text = st.text_input(
-        "Variable rates (period:rate%, comma-separated)", value="")
+
     io_text = st.text_input(
         "Interest-only windows (start-end, comma-separated)", value="")
 
@@ -380,6 +390,7 @@ col6.metric("Principal repaid", f"€{T['total_principal']:,.2f}")
 df = pd.DataFrame([
     {
         "Installment": r.number,
+        "RateAnnualPct": r.rate_annual_pct,
         "BasePayment": r.base_payment,
         "Overpayment": r.overpay,
         "LumpSum": r.lump,
@@ -400,17 +411,23 @@ st.subheader("Charts")
 plot_col1, plot_col2 = st.columns(2)
 with plot_col1:
     fig1, ax1 = plt.subplots()
-    ax1.plot(df[df["Installment"] >= 1]["Installment"],
-             df[df["Installment"] >= 1]["Balance"])  # no explicit colors
+    dff = df[df["Installment"] >= 1].copy()
+    dff["CumulativeNetPaid"] = dff["NetPaid"].cumsum()  # <-- NEW
+    ax1.plot(dff["Installment"], dff["Balance"], label="Balance")
+    ax1.plot(dff["Installment"], dff["CumulativeNetPaid"],
+             label="Cumulative Net Paid")  # <-- NEW
     ax1.set_title("Remaining Balance")
     ax1.set_xlabel("Installment")
     ax1.set_ylabel("€")
+    ax1.legend()
     st.pyplot(fig1, clear_figure=True)
 with plot_col2:
     fig2, ax2 = plt.subplots()
     dff = df[df["Installment"] >= 1]
+    dff["TotalPayment"] = dff["Interest"] + dff["Principal"]
     ax2.plot(dff["Installment"], dff["Principal"], label="Principal")
     ax2.plot(dff["Installment"], dff["Interest"], label="Interest")
+    ax2.plot(dff["Installment"], dff["TotalPayment"], label="Total Payment")
     ax2.set_title("Payment Breakdown per Installment")
     ax2.set_xlabel("Installment")
     ax2.set_ylabel("€ per installment")
