@@ -10,6 +10,8 @@ from typing import List, Optional, Dict, Tuple, Literal
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
+import numpy_financial as npf
 
 # ---------- Core engine (lifted from your CLI version, trimmed for app use) ----------
 
@@ -215,6 +217,42 @@ def totals(schedule: List[Installment]) -> dict:
         "num_installments": len([r for r in schedule if r.number > 0]),
     }
 
+
+def compute_aprc(schedule: List[Installment], payments_per_year: int, principal: float) -> float:
+    """
+    APRC = annualised IRR of borrower cash flows:
+      +t0: loan drawdown you receive (principal minus any upfront cashback)
+      -t1..n: each installment's net payment (NetPaid)
+    Returns % (e.g., 3.456).
+    """
+    if not schedule:
+        return 0.0
+
+    # Upfront cashback (your engine adds Installment #0 row for it)
+    upfront_cb = schedule[0].cashback if schedule[0].number == 0 else 0.0
+
+    # t0 inflow: what you receive on drawdown
+    t0 = principal - upfront_cb
+
+    # Build cashflows: t0 inflow (positive), then negative outflows per period
+    cfs = [t0]
+    for r in schedule:
+        if r.number >= 1:
+            cfs.append(-r.net_paid)
+
+    # Need at least one sign change for IRR to exist
+    if not (any(x > 0 for x in cfs) and any(x < 0 for x in cfs)):
+        return 0.0
+
+    try:
+        irr_per_period = npf.irr(cfs)  # periodic IRR
+        if irr_per_period is None or np.isnan(irr_per_period):
+            return 0.0
+        aprc = (1.0 + irr_per_period) ** payments_per_year - 1.0
+        return round(aprc * 100.0, 3)
+    except Exception:
+        return 0.0
+
 # ---------- Streamlit UI helpers ----------
 
 
@@ -267,18 +305,38 @@ st.caption(
 
 with st.sidebar:
     st.header("Loan Basics")
-    principal = st.number_input(
-        "Mortgage amount (€)", min_value=0.0, value=400000.0, step=1000.0)
-    rate = st.number_input("Starting nominal annual rate (%)",
-                           min_value=0.0, value=3.40, step=0.05)
+    # Inputs for mortgage parameters
+    st.markdown("Enter the mortgage details below:")
+    property_value = st.number_input(
+        "Property value (€)", min_value=0.0, value=450000.0, step=1000.0)
+    deposit_cash = st.number_input(
+        "Deposit (cash) (€)", min_value=0.0, value=15000.0, step=1000.0)
+    htb_input = st.number_input(
+        "Help to Buy (€)", min_value=0.0, value=30000.0, step=1000.0, help="Capped at €30,000")
+    htb = min(htb_input, 30000.0)
+
+    # Derived mortgage amount from property value − deposits
+    principal = max(0.0, property_value - deposit_cash - htb)
+
     term_years = st.number_input("Term (years)", min_value=1, value=35, step=1)
     freq = st.selectbox("Repayment frequency", options=[("Monthly", 12), ("Fortnightly", 26), (
         "Weekly", 52), ("Quarterly", 4)], index=0, format_func=lambda x: x[0])
     payments_per_year = freq[1]
 
+    st.header("Property Energy Rating")
+    energy_rating = st.selectbox(
+        "BER / Energy Efficiency Rating",
+        options=["A", "B", "C", "D", "E", "F", "G"],
+        index=0,
+        help="Used to determine eligibility for green mortgage products."
+    )
+
     st.header("Rate Type")
     rate_type = st.selectbox("Rate type", options=[
-                             "Fixed", "Variable"], index=0)
+        "Fixed", "Variable"], index=0)
+    rate = st.number_input("Starting nominal annual rate (%)",
+                           min_value=0.0, value=3.40, step=0.05)
+
     fixed_years = st.number_input("Fixed period (years)", min_value=1, max_value=int(
         term_years), value=1, step=1, disabled=(rate_type == "Variable"))
     roll_rate_after_fixed = st.number_input(
@@ -318,6 +376,7 @@ with st.sidebar:
     cb_map_text = st.text_input(
         "Extra cashback at specific installments (period:amount)", value="")
 
+
 # Parse complex inputs
 lumps = {}
 rates = {}
@@ -352,6 +411,13 @@ try:
 except Exception:
     st.warning("Check cashback map format (e.g., 1:2000, 12:100)")
 
+# LTV metrics (uses principal & property_value from sidebar)
+ltv = (principal / property_value * 100.0) if property_value > 0 else 0.0
+col_m1, col_m2, col_m3 = st.columns(3)
+col_m1.metric("Mortgage amount", f"€{principal:,.0f}")
+col_m2.metric("Total deposit", f"€{(deposit_cash + htb):,.0f}")
+col_m3.metric("LTV", f"{ltv:.1f}%")
+
 # Build schedule
 schedule = build_schedule(
     principal=principal,
@@ -385,6 +451,10 @@ col4.metric("Net paid", f"€{T['net_total_paid']:,.2f}")
 col5, col6 = st.columns(2)
 col5.metric("Total interest", f"€{T['total_interest']:,.2f}")
 col6.metric("Principal repaid", f"€{T['total_principal']:,.2f}")
+
+aprc = compute_aprc(schedule, payments_per_year, principal)
+col7, col8 = st.columns(2)
+col7.metric("APRC", f"{aprc:.2f}%")
 
 # Table
 df = pd.DataFrame([
